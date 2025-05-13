@@ -98,3 +98,4 @@ Desktop.ini
 
 # MongoDB dump files
 dump/
+package-lock.json
