@@ -1,0 +1,5 @@
+flask
+numpy
+tensorflow
+gunicorn
+jaxlib==0.6.0
