@@ -5,6 +5,7 @@ import http from "http";
 import { Server } from "socket.io";
 import axios from "axios";
 import historyRoutes from "./routes/historyRoutes.js";
+import userRoutes from "./routes/userRoutes.js";
 import RequestHistory from "./models/requestHistory.js";
 
 const app = express();
@@ -41,15 +42,19 @@ app.post("/api/predict", async (req, res) => {
     // Forward request to Flask API
     const flaskResponse = await axios.post("http://127.0.0.1:5000/predict", {
       text: text,
+      num_return_sequences: 2, // Request 2 generations from Flask
     });
 
     const endTime = Date.now();
 
     // Save request to history
+    const predictions =
+      flaskResponse.data.predictions ||
+      (flaskResponse.data.prediction ? [flaskResponse.data.prediction] : []);
     const requestHistory = new RequestHistory({
       endpoint: "/predict",
       inputText: text,
-      prediction: flaskResponse.data.predictions,
+      prediction: predictions, // Always save as array
       timestamp: new Date(),
       processingTime: endTime - startTime,
     });
@@ -70,11 +75,53 @@ app.post("/api/predict", async (req, res) => {
     // Emit new history event to connected clients
     io.emit("newPrediction", requestHistory);
 
-    // Return the original response
-    res.json(flaskResponse.data);
+    // Return both predictions in a consistent array format
+    res.json({ predictions });
   } catch (error) {
     console.error("Error proxying request:", error);
     res.status(500).json({ error: "Error processing request" });
+  }
+});
+
+// API proxy endpoint for next word prediction with history logging
+app.post("/api/predict_next_word", async (req, res) => {
+  try {
+    const startTime = Date.now();
+    const text = req.body.text;
+
+    // Forward request to Flask API
+    const flaskResponse = await axios.post("http://127.0.0.1:5000/predict_next_word", {
+      text: text,
+    });
+
+    const endTime = Date.now();
+
+    // Save request to history
+    const requestHistory = new RequestHistory({
+      endpoint: "/predict_next_word",
+      inputText: text,
+      prediction: flaskResponse.data.next_word || flaskResponse.data, // Save the next word or the whole response
+      timestamp: new Date(),
+      processingTime: endTime - startTime,
+    });
+
+    try {
+      await requestHistory.save();
+      console.log(
+        `Next word history saved: ${requestHistory._id} for text "${text.substring(0, 20)}..."`
+      );
+    } catch (saveError) {
+      console.error("Error saving next word history:", saveError);
+    }
+
+    // Emit new history event to connected clients
+    io.emit("newNextWordPrediction", requestHistory);
+
+    // Return the original response
+    res.json(flaskResponse.data);
+  } catch (error) {
+    console.error("Error proxying next word request:", error);
+    res.status(500).json({ error: "Error processing next word request" });
   }
 });
 
@@ -145,6 +192,9 @@ app.post("/api/batch_predict", async (req, res) => {
 
 // Use history routes
 app.use("/api/history", historyRoutes);
+
+// Use user authentication routes
+app.use("/api/user", userRoutes);
 
 // Socket.io connection handler
 io.on("connection", (socket) => {

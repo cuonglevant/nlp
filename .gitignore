@@ -1,5 +1,3 @@
-
-
 # See httpshelp.github.comarticlesignoring-files for more about ignoring files.
 
 # dependencies
@@ -87,6 +85,8 @@ NodeJS/build/
 NodeJS/coverage/
 NodeJS/.cache/
 NodeJS/.turbo/
+
+BE/model/
 
 # Logs
 *.log

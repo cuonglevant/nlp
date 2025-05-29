@@ -1,10 +1,9 @@
 from flask import Flask, request, jsonify
 import numpy as np
 import pickle
-import tensorflow as tf
-from tensorflow.keras.models import load_model
-from tensorflow.keras.preprocessing.sequence import pad_sequences
 import os
+from transformers import GPT2Tokenizer, GPT2LMHeadModel
+import torch
 
 app = Flask(__name__)
 
@@ -12,23 +11,17 @@ app = Flask(__name__)
 model = None
 tokenizer = None
 max_sequence_length = 100  # Set this to match your model's expected input
+MODEL_NOT_LOADED_MSG = "Model or tokenizer not loaded"
 
 def load_model_and_tokenizer():
-    """Load the RNN model and tokenizer at startup"""
+    """Load the GPT-2 model and tokenizer at startup"""
     global model, tokenizer
     
     try:
-        # Load the model
-        model_path = os.path.join(os.path.dirname(__file__), 'RNN.h5')
-        model = load_model(model_path)
-        print(f"Model loaded successfully from {model_path}")
-        
-        # Load the tokenizer
-        tokenizer_path = os.path.join(os.path.dirname(__file__), 'tokenizer.pickle')
-        with open(tokenizer_path, 'rb') as handle:
-            tokenizer = pickle.load(handle)
-        print(f"Tokenizer loaded successfully from {tokenizer_path}")
-        
+        model_dir = os.path.join(os.path.dirname(__file__), 'model', 'GPT-2-10m')
+        tokenizer = GPT2Tokenizer.from_pretrained(model_dir)
+        model = GPT2LMHeadModel.from_pretrained(model_dir)
+        print(f"Model and tokenizer loaded successfully from {model_dir}")
         return True
     except Exception as e:
         print(f"Error loading model or tokenizer: {str(e)}")
@@ -40,65 +33,46 @@ def health_check():
     if model is not None and tokenizer is not None:
         return jsonify({"status": "healthy", "message": "Model and tokenizer are loaded"}), 200
     else:
-        return jsonify({"status": "unhealthy", "message": "Model or tokenizer not loaded"}), 500
+        return jsonify({"status": "unhealthy", "message": MODEL_NOT_LOADED_MSG}), 500
 
 @app.route('/predict', methods=['POST'])
 def predict():
-    """Endpoint to make predictions using the loaded RNN model"""
+    """Endpoint to make predictions using the loaded GPT-2 model"""
     if model is None or tokenizer is None:
-        return jsonify({"error": "Model or tokenizer not loaded"}), 500
+        return jsonify({"error": MODEL_NOT_LOADED_MSG}), 500
     
-    # Get the text from the request
     data = request.get_json(force=True)
     
     if 'text' not in data:
         return jsonify({"error": "No text provided in the request"}), 400
     
     text = data['text']
+    num_return_sequences = data.get('num_return_sequences', 1)
     
     try:
         # Tokenize and pad the text
-        sequences = tokenizer.texts_to_sequences([text])
-        padded_sequences = pad_sequences(sequences, maxlen=max_sequence_length)
+        inputs = tokenizer.encode(text, return_tensors="pt", max_length=max_sequence_length, truncation=True)
         
         # Make prediction
-        prediction = model.predict(padded_sequences)
+        with torch.no_grad():
+            outputs = model.generate(inputs, max_length=max_sequence_length, num_return_sequences=num_return_sequences, do_sample=True)
         
-        # Process the prediction based on your model's output
-        # This depends on your specific model architecture
-        result = process_prediction(prediction, top_k=3)
-        return jsonify({"predictions": result}), 200
+        # Decode the predictions
+        predictions = [tokenizer.decode(output, skip_special_tokens=True) for output in outputs]
+        
+        if num_return_sequences == 1:
+            return jsonify({"prediction": predictions[0]}), 200
+        else:
+            return jsonify({"predictions": predictions}), 200
     
     except Exception as e:
         return jsonify({"error": f"Prediction error: {str(e)}"}), 500
-
-def process_prediction(prediction, top_k=3):
-    """
-    Trả về top-k từ tiếp theo có xác suất cao nhất
-    """
-    if isinstance(prediction, np.ndarray):
-        # Lấy chỉ số của top-k xác suất lớn nhất
-        top_indices = prediction[0].argsort()[-top_k:][::-1]
-        # Tạo mapping index -> word
-        index_word = {v: k for k, v in tokenizer.word_index.items()}
-        results = []
-        for idx in top_indices:
-            # Tìm từ tương ứng với index (nếu có)
-            word = index_word.get(idx, "<unknown>")
-            confidence = float(prediction[0][idx])
-            results.append({
-                "next_word": word,
-                "confidence": confidence
-            })
-        return results
-    return {"raw_prediction": prediction.tolist()}
-    
 
 @app.route('/batch_predict', methods=['POST'])
 def batch_predict():
     """Endpoint to make batch predictions"""
     if model is None or tokenizer is None:
-        return jsonify({"error": "Model or tokenizer not loaded"}), 500
+        return jsonify({"error": MODEL_NOT_LOADED_MSG}), 500
     
     data = request.get_json(force=True)
     
@@ -109,16 +83,16 @@ def batch_predict():
     
     try:
         # Tokenize and pad all texts
-        sequences = tokenizer.texts_to_sequences(texts)
-        padded_sequences = pad_sequences(sequences, maxlen=max_sequence_length)
+        inputs = tokenizer(texts, return_tensors="pt", padding=True, truncation=True, max_length=max_sequence_length)
         
         # Make predictions
-        predictions = model.predict(padded_sequences)
+        with torch.no_grad():
+            outputs = model.generate(**inputs, max_length=max_sequence_length)
         
-        # Process all predictions
-        results = [process_prediction(pred.reshape(1, -1)) for pred in predictions]
+        # Decode all predictions
+        predictions = [tokenizer.decode(output, skip_special_tokens=True) for output in outputs]
         
-        return jsonify({"predictions": results}), 200
+        return jsonify({"predictions": predictions}), 200
     
     except Exception as e:
         return jsonify({"error": f"Batch prediction error: {str(e)}"}), 500
@@ -138,17 +112,58 @@ def tokenize():
     
     try:
         # Tokenize the text
-        sequences = tokenizer.texts_to_sequences([text])
-        padded_sequences = pad_sequences(sequences, maxlen=max_sequence_length)
+        tokens = tokenizer.encode(text)
         
         return jsonify({
-            "tokens": sequences[0],
-            "padded_sequence": padded_sequences[0].tolist(),
-            "word_index": {word: index for word, index in tokenizer.word_index.items() if word in text.split()}
+            "tokens": tokens,
+            "word_index": {word: index for index, word in enumerate(tokenizer.get_vocab()) if word in text.split()}
         }), 200
     
     except Exception as e:
         return jsonify({"error": f"Tokenization error: {str(e)}"}), 500
+
+@app.route('/predict_next_word', methods=['POST'])
+def predict_next_word():
+    """Endpoint to predict the next word only using the loaded GPT-2 model"""
+    if model is None or tokenizer is None:
+        return jsonify({"error": MODEL_NOT_LOADED_MSG}), 500
+    
+    data = request.get_json(force=True)
+    
+    if 'text' not in data:
+        return jsonify({"error": "No text provided in the request"}), 400
+    
+    text = data['text']
+    
+    try:
+        # Tokenize the text
+        inputs = tokenizer.encode_plus(
+            text,
+            return_tensors="pt",
+            max_length=max_sequence_length,
+            truncation=True,
+            padding="max_length"
+        )
+        input_ids = inputs["input_ids"]
+        attention_mask = inputs["attention_mask"]
+        
+        # Generate only 1 next token
+        with torch.no_grad():
+            outputs = model.generate(
+                input_ids,
+                attention_mask=attention_mask,
+                max_new_tokens=1,
+                do_sample=False
+            )
+        
+        # The next token is the last token in the output
+        next_token_id = outputs[0, -1].item()
+        next_word = tokenizer.decode([next_token_id], skip_special_tokens=True)
+        
+        return jsonify({"next_word": next_word, "next_token_id": next_token_id}), 200
+    
+    except Exception as e:
+        return jsonify({"error": f"Next word prediction error: {str(e)}"}), 500
 
 if __name__ == '__main__':
     # Load model and tokenizer before starting the server
